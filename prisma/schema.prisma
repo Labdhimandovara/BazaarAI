@@ -1,0 +1,137 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// 1. Merchant Table
+model Merchant {
+  id                 String         @id @default(uuid())
+  name               String
+  logo               String?
+  source             String         // e.g. "SYNTHETIC", "FLIPKART", "AMAZON"
+  isActive           Boolean        @default(true)
+  isRazorpayEnabled  Boolean        @default(true)
+  checkoutType       String         @default("direct") // direct | redirect
+  catalogStatus      String         @default("AI_READY") // AI_READY | MANUAL
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+  offers             ProductOffer[]
+}
+
+// 2. Canonical Product Table
+model Product {
+  id              String           @id @default(uuid())
+  canonicalName   String           // e.g. "Funskool Chess Set"
+  brand           String
+  model           String?
+  category        String
+  description     String?
+  attributes      String           // Stringified JSON containing specs
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  offers          ProductOffer[]
+  recommendations Recommendation[]
+}
+
+// 3. ProductSource / Offer Table
+model ProductOffer {
+  id                      String   @id @default(uuid())
+  productId               String
+  product                 Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  merchantId              String
+  merchant                Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  source                  String   // e.g., "SYNTHETIC", "FLIPKART"
+  sourceProductId         String   // ID in the source system
+  pricePaise              Int      // Price in integer paise (e.g. 45000 for Rs. 450)
+  currency                String   @default("INR")
+  availability            Boolean  @default(true)
+  shippingCostPaise       Int      @default(0)
+  deliveryEstimate        String   // e.g. "2 days", "Same day"
+  discount                Int      @default(0)
+  sellerRating            Float    @default(5.0)
+  productUrl              String
+  imageUrl                String?
+  priceFetchedAt          DateTime @default(now())
+  availabilityFetchedAt   DateTime @default(now())
+}
+
+// 4. Recommendation Table
+model Recommendation {
+  id              String   @id @default(uuid())
+  sessionId       String
+  productId       String
+  product         Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  score           Float    // Overall Buyer Score (0 to 100)
+  objective       String   // best_value | cheapest | fastest | highest_quality
+  preferenceScore Float
+  budgetScore     Float
+  qualityScore    Float
+  sellerScore     Float
+  deliveryScore   Float
+  offerScore      Float
+  explanation     String   // Explainable narrative
+  createdAt       DateTime @default(now())
+}
+
+// 5. PurchasePolicy Table
+model PurchasePolicy {
+  id                String    @id @default(uuid())
+  name              String    @default("Default Policy")
+  maxAmountPaise    Int
+  currency          String    @default("INR")
+  allowedMerchants  String    // Stringified JSON array of allowed merchant IDs
+  blockedCategories String    // Stringified JSON array of blocked categories
+  maxQuantity       Int       @default(1)
+  approvalRequired  Boolean   @default(true)
+  expiresAt         DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+}
+
+// 6. PurchaseApproval Table
+model PurchaseApproval {
+  id                  String         @id @default(uuid())
+  sessionId           String
+  productId           String
+  merchantId          String
+  approvedAmountPaise Int
+  currency            String         @default("INR")
+  quantity            Int            @default(1)
+  status              String         @default("PENDING") // PENDING | APPROVED | EXPIRED | INVALIDATED | BLOCKED
+  createdAt           DateTime       @default(now())
+  expiresAt           DateTime
+  approvedAt          DateTime?
+  invalidatedAt       DateTime?
+  invalidationReason  String?
+  transactions        Transaction[]
+}
+
+// 7. Transaction Table
+model Transaction {
+  id                 String           @id @default(uuid())
+  purchaseApprovalId String
+  purchaseApproval   PurchaseApproval @relation(fields: [purchaseApprovalId], references: [id], onDelete: Cascade)
+  razorpayOrderId    String?          @unique
+  razorpayPaymentId  String?          @unique
+  approvedAmountPaise Int
+  finalAmountPaise   Int
+  currency           String           @default("INR")
+  status             String           @default("INITIATED") // INITIATED | SUCCESS | FAILED | BLOCKED
+  failureReason      String?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+}
+
+// 8. AuditTrail Table
+model AuditTrail {
+  id        String   @id @default(uuid())
+  sessionId String
+  eventType String   // e.g. "USER_REQUEST", "PURCHASE_BLOCKED"
+  metadata  String?  // Stringified JSON
+  outcome   String   // SUCCESS | FAILURE | BLOCKED etc.
+  createdAt DateTime @default(now())
+}
