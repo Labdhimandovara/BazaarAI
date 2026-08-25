@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "prisma db push --accept-data-loss && npx tsx prisma/seed.ts && next build",
+    "build": "node -e \"process.env.DATABASE_URL='file:./dev.db'; const { execSync } = require('child_process'); execSync('prisma db push --accept-data-loss', { stdio: 'inherit' }); execSync('npx tsx prisma/seed.ts', { stdio: 'inherit' }); execSync('next build', { stdio: 'inherit' });\"",
     "start": "next start",
     "lint": "next lint",
     "postinstall": "prisma generate",
