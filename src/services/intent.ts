@@ -71,8 +71,10 @@ export async function parseIntentFromConversation(
 ): Promise<ModelResponse> {
   const provider = process.env.AI_PROVIDER || "openai";
   const hasKey = provider === "gemini"
-    ? (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== "your-gemini-api-key-here" && process.env.GEMINI_API_KEY !== "")
-    : (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== "your-openai-api-key-here" && process.env.OPENAI_API_KEY !== "");
+    ? (!!process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== "your-gemini-api-key-here" && process.env.GEMINI_API_KEY !== "")
+    : (!!process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== "your-openai-api-key-here" && process.env.OPENAI_API_KEY !== "");
+
+  console.log(`[AI INTENT PARSER] Provider: ${provider}, Model: ${provider === "gemini" ? "gemini-1.5-flash" : "gpt-4o-mini"}, Required Key Exists: ${hasKey}`);
 
   if (!hasKey) {
     return runLocalFallback(message, history);
@@ -159,8 +161,9 @@ export async function parseIntentFromConversation(
       return parsed;
     }
     throw new Error("Failed to parse structured intent output from OpenAI.");
-  } catch (err) {
-    console.error("OpenAI Intent Service Error:", err);
+  } catch (err: any) {
+    const errorType = err.status || err.name || "UNKNOWN_ERROR";
+    console.error(`[AI INTENT PARSER ERROR] Provider: ${provider}, Model: ${provider === "gemini" ? "gemini-1.5-flash" : "gpt-4o-mini"}, Status/Type: ${errorType}, Message: ${err.message || err}`);
     return runLocalFallback(message, history);
   }
 }
@@ -222,6 +225,15 @@ export function parseBudgetToPaise(text: string): number | null {
   return Math.round(rupees * 100);
 }
 
+function hasWord(text: string, word: string): boolean {
+  const regex = new RegExp(`\\b${word.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')}(?:s|es)?\\b`, "i");
+  return regex.test(text);
+}
+
+function hasAnyWord(text: string, words: string[]): boolean {
+  return words.some(w => hasWord(text, w));
+}
+
 /**
  * Local parser to resolve basic queries if OpenAI is missing or times out.
  * Strictly enforces refinement vs new request context merging.
@@ -232,16 +244,16 @@ function runLocalFallback(message: string, history: ChatMessage[] = []): ModelRe
   // 1. Detect if the current message represents a new request or intent context override using classifyMessage
   const messageType = classifyMessage(message);
   const isNewRequest = messageType === "NEW_REQUEST";
-
+ 
   // 2. Build full lookup text based on refinement state
   let textForFilters = currentMsgLower;
   if (!isNewRequest) {
     // If it's a refinement (e.g. "under 500", "make it cheaper"), include history to preserve item context
     textForFilters = [...history.filter(h => h.role === "user").map(h => h.content), message].join(" ").toLowerCase();
   }
-
+ 
   // 3. Subject verification for completion state
-  const hasSpecificSubject = /chess|cricket|bat|ball|headphones|wireless|audio|earbuds|tws|laptop|notebook|computer|phone|smartphone|mobile|smartwatch|watch|shoes|footwear|sneakers|runners|running|book|novel|fiction|backpack|bag|kitchen|cooker|kettle|grinder|vacuum|appliance|fashion|clothing|shirt|jeans|polo|travel|suitcase|luggage|journal/i.test(textForFilters);
+  const hasSpecificSubject = /\b(chess|cricket|bats?|balls?|headphones?|wireless|audio|earbuds?|tws|laptops?|notebooks?|computers?|phones?|smartphones?|mobiles?|smartwatch(?:es)?|watch(?:es)?|shoes?|footwear|sneakers?|runners?|running|books?|novels?|fiction|backpacks?|bags?|kitchen|cookers?|kettles?|grinders?|vacuums?|appliances?|fashion|clothing|shirts?|jeans|polo|travel|suitcases?|luggage|journals?)\b/i.test(textForFilters);
   if (!hasSpecificSubject) {
     return {
       isComplete: false,
@@ -296,55 +308,55 @@ function runLocalFallback(message: string, history: ChatMessage[] = []): ModelRe
   let category: string | null = null;
   let subcategory: string | null = null;
 
-  if (textForFilters.includes("chess")) {
+  if (hasWord(textForFilters, "chess")) {
     category = "chess/games";
     subcategory = "chess";
-  } else if (textForFilters.includes("cricket") || textForFilters.includes("bat") || textForFilters.includes("ball")) {
+  } else if (hasAnyWord(textForFilters, ["cricket", "bat", "ball"])) {
     category = "cricket/sports";
-    subcategory = textForFilters.includes("ball") ? "cricket-balls" : "cricket-bats";
-  } else if (textForFilters.includes("laptop") || textForFilters.includes("notebook") || textForFilters.includes("computer")) {
+    subcategory = hasWord(textForFilters, "ball") ? "cricket-balls" : "cricket-bats";
+  } else if (hasAnyWord(textForFilters, ["laptop", "notebook", "computer"])) {
     category = "electronics";
     subcategory = "laptops";
-  } else if (textForFilters.includes("headphones") || textForFilters.includes("wireless") || textForFilters.includes("audio")) {
+  } else if (hasAnyWord(textForFilters, ["headphones", "headphone", "wireless", "audio"])) {
     category = "electronics";
     subcategory = "headphones";
-  } else if (textForFilters.includes("earbuds") || textForFilters.includes("tws") || textForFilters.includes("ear buds")) {
+  } else if (hasAnyWord(textForFilters, ["earbuds", "earbud", "tws", "ear buds", "ear bud"])) {
     category = "electronics";
     subcategory = "earbuds";
-  } else if (textForFilters.includes("smartwatch") || textForFilters.includes("watch") || textForFilters.includes("fitness watch")) {
+  } else if (hasAnyWord(textForFilters, ["smartwatch", "smartwatches", "watch", "watches", "fitness watch"])) {
     category = "electronics";
     subcategory = "smartwatches";
-  } else if (textForFilters.includes("phone") || textForFilters.includes("smartphone") || textForFilters.includes("mobile")) {
+  } else if (hasAnyWord(textForFilters, ["phone", "smartphone", "mobile"])) {
     category = "electronics";
     subcategory = "smartphones";
-  } else if (textForFilters.includes("tablet") || textForFilters.includes("ipad")) {
+  } else if (hasAnyWord(textForFilters, ["tablet", "ipad"])) {
     category = "electronics";
     subcategory = "tablets";
-  } else if (textForFilters.includes("shoes") || textForFilters.includes("footwear") || textForFilters.includes("sneakers") || textForFilters.includes("runners") || textForFilters.includes("running")) {
+  } else if (hasAnyWord(textForFilters, ["shoes", "shoe", "footwear", "sneakers", "sneaker", "runners", "runner", "running"])) {
     category = "footwear";
-    subcategory = textForFilters.includes("running") ? "running-shoes" : "casual-shoes";
-  } else if (textForFilters.includes("book") || textForFilters.includes("novel") || textForFilters.includes("fiction")) {
+    subcategory = hasWord(textForFilters, "running") ? "running-shoes" : "casual-shoes";
+  } else if (hasAnyWord(textForFilters, ["book", "novel", "fiction"])) {
     category = "books";
     subcategory = "fiction";
-  } else if (textForFilters.includes("backpack") || textForFilters.includes("bag")) {
+  } else if (hasAnyWord(textForFilters, ["backpack", "bag"])) {
     category = "bags";
     subcategory = "backpacks";
-  } else if (textForFilters.includes("kitchen") || textForFilters.includes("cooker") || textForFilters.includes("kettle") || textForFilters.includes("grinder")) {
+  } else if (hasAnyWord(textForFilters, ["kitchen", "cooker", "kettle", "grinder"])) {
     category = "kitchen";
     subcategory = "appliances";
-  } else if (textForFilters.includes("vacuum") || textForFilters.includes("appliance")) {
+  } else if (hasAnyWord(textForFilters, ["vacuum", "appliance"])) {
     category = "home appliances";
     subcategory = "vacuum";
-  } else if (textForFilters.includes("fashion") || textForFilters.includes("clothing") || textForFilters.includes("shirt") || textForFilters.includes("jeans") || textForFilters.includes("polo")) {
+  } else if (hasAnyWord(textForFilters, ["fashion", "clothing", "shirt", "jeans", "polo"])) {
     category = "fashion";
     subcategory = "clothing";
-  } else if (textForFilters.includes("travel") || textForFilters.includes("suitcase") || textForFilters.includes("luggage")) {
+  } else if (hasAnyWord(textForFilters, ["travel", "suitcase", "luggage"])) {
     category = "travel";
     subcategory = "accessories";
-  } else if (textForFilters.includes("toys") || textForFilters.includes("gifts")) {
+  } else if (hasAnyWord(textForFilters, ["toys", "toy", "gifts", "gift"])) {
     category = "toys";
     subcategory = "gifts";
-  } else if (textForFilters.includes("journal") || textForFilters.includes("notebook")) {
+  } else if (hasAnyWord(textForFilters, ["journal", "notebook"])) {
     category = "gifts";
     subcategory = "journal";
   }
@@ -432,7 +444,10 @@ export function classifyMessage(message: string): "NEW_REQUEST" | "REFINEMENT" {
   const hasContextPronoun = /\b(one|ones|it|that|these|those)\b/i.test(text);
 
   // If it contains a product keyword:
-  const hasProductKeyword = productKeywords.some(kw => text.includes(kw));
+  const hasProductKeyword = productKeywords.some(kw => {
+    const regex = new RegExp(`\\b${kw}(?:s|es)?\\b`, "i");
+    return regex.test(text);
+  });
 
   if (hasProductKeyword) {
     if (hasContextPronoun) {

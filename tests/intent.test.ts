@@ -230,4 +230,61 @@ describe("Conversational Intent Parser Tests", () => {
     expect(res.extractedIntent!.category).toBe("chess/games");
     expect(res.extractedIntent!.objective).toBe("fastest");
   });
+
+  // Word Boundary Keyword Matching Regression Tests
+  test("I need a cricket bat -> cricket-bats", async () => {
+    const res = await parseIntentFromConversation("I need a cricket bat", []);
+    expect(res.isComplete).toBe(true);
+    expect(res.extractedIntent!.subcategory).toBe("cricket-bats");
+  });
+
+  test("I need cricket bats under ₹2,000 -> cricket-bats", async () => {
+    const res = await parseIntentFromConversation("I need cricket bats under ₹2,000", []);
+    expect(res.isComplete).toBe(true);
+    expect(res.extractedIntent!.subcategory).toBe("cricket-bats");
+    expect(res.extractedIntent!.maxBudgetPaise).toBe(200000);
+  });
+
+  test("I need a phone with good battery under ₹20,000 -> smartphones", async () => {
+    const res = await parseIntentFromConversation("I need a phone with good battery under ₹20,000", []);
+    expect(res.isComplete).toBe(true);
+    expect(res.extractedIntent!.subcategory).toBe("smartphones");
+    expect(res.extractedIntent!.maxBudgetPaise).toBe(2000000);
+  });
+
+  test("Find a phone with large battery -> smartphones", async () => {
+    const res = await parseIntentFromConversation("Find a phone with large battery", []);
+    expect(res.isComplete).toBe(true);
+    expect(res.extractedIntent!.subcategory).toBe("smartphones");
+  });
+
+  test("I need wireless headphones -> headphones", async () => {
+    const res = await parseIntentFromConversation("I need wireless headphones", []);
+    expect(res.isComplete).toBe(true);
+    expect(res.extractedIntent!.subcategory).toBe("headphones");
+  });
+
+  test("Find me a smartwatch -> smartwatches", async () => {
+    const res = await parseIntentFromConversation("Find me a smartwatch", []);
+    expect(res.isComplete).toBe(true);
+    expect(res.extractedIntent!.subcategory).toBe("smartwatches");
+  });
+
+  test("I need earbuds -> earbuds", async () => {
+    const res = await parseIntentFromConversation("I need earbuds", []);
+    expect(res.isComplete).toBe(true);
+    expect(res.extractedIntent!.subcategory).toBe("earbuds");
+  });
+
+  test("Find me a laptop -> laptops", async () => {
+    const res = await parseIntentFromConversation("Find me a laptop", []);
+    expect(res.isComplete).toBe(true);
+    expect(res.extractedIntent!.subcategory).toBe("laptops");
+  });
+
+  test("Find cricket bat with good battery -> cricket-bats", async () => {
+    const res = await parseIntentFromConversation("Find cricket bat with good battery", []);
+    expect(res.isComplete).toBe(true);
+    expect(res.extractedIntent!.subcategory).toBe("cricket-bats");
+  });
 });
