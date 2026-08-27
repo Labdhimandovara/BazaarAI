@@ -140,11 +140,13 @@ export function calculateBuyerScore(
   // Uses rating (0 to 5) -> 0 to 100
   // Synthetic data has generic quality rating, mapped to sellerRating for now or calculated from attributes
   const rating = offer.sellerRating; // standard rating signal
-  const qualityScore = Math.round(rating * 20);
-  if (rating >= 4.5) {
-    reasons.push(`Highly rated by buyers (${rating}★)`);
-  } else if (rating < 3.8) {
-    tradeoffs.push(`Customer reviews are lower than average (${rating}★)`);
+  const qualityScore = rating !== null ? Math.round(rating * 20) : 70; // neutral score (e.g. 70) for unknown
+  if (rating !== null) {
+    if (rating >= 4.5) {
+      reasons.push(`Highly rated by buyers (${rating}★)`);
+    } else if (rating < 3.8) {
+      tradeoffs.push(`Customer reviews are lower than average (${rating}★)`);
+    }
   }
 
   // 4. Seller Score (10% default)

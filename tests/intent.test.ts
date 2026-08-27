@@ -82,10 +82,10 @@ describe("Conversational Intent Parser Tests", () => {
   });
 
   // 15. Source preference filtering
-  test("Source preference matches Flipkart request", async () => {
-    const res = await parseIntentFromConversation("Search only flipkart for chess set");
+  test("Source preference matches eBay request", async () => {
+    const res = await parseIntentFromConversation("Search only ebay for chess set");
     expect(res.isComplete).toBe(true);
-    expect(res.extractedIntent!.sourcePreference).toBe("Flipkart");
+    expect(res.extractedIntent!.sourcePreference).toBe("eBay");
   });
 
   // 16. Ambiguity check (rejection)
@@ -150,10 +150,10 @@ describe("Conversational Intent Parser Tests", () => {
   });
 
   // 23. Source preference matching Amazon request
-  test("Source preference matches Amazon request", async () => {
+  test("Unsupported source preference returns null", async () => {
     const res = await parseIntentFromConversation("Search only amazon for cricket bat");
     expect(res.isComplete).toBe(true);
-    expect(res.extractedIntent!.sourcePreference).toBe("Amazon");
+    expect(res.extractedIntent!.sourcePreference).toBeNull();
   });
 
   // 24. Conversational objective shift

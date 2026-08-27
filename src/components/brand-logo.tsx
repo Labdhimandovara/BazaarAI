@@ -20,10 +20,10 @@ export function BrandLogo({ className = "", showText = true }: BrandLogoProps) {
       </div>
       {showText && (
         <div className="flex flex-col">
-          <span className="text-zinc-50 font-semibold tracking-tight leading-none text-base">
+          <span className="text-[#172033] font-bold tracking-tight leading-none text-base">
             Bazaar AI
           </span>
-          <span className="text-zinc-500 text-[10px] font-medium tracking-wide mt-0.5 uppercase">
+          <span className="text-[#667085] text-[10px] font-medium tracking-wide mt-0.5 uppercase">
             Agentic Commerce
           </span>
         </div>

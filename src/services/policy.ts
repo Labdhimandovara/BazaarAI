@@ -7,6 +7,7 @@ import { db } from "@/lib/db";
 export interface PolicyCheckResult {
   name: string;
   passed: boolean;
+  state?: "PASS" | "FAIL" | "NOT_REQUESTED";
   actual: any;
   limit: any;
   message: string;
@@ -55,6 +56,7 @@ export function checkBudget(totalPaise: number, limitPaise: number): PolicyCheck
   return {
     name: "MAX_SPEND",
     passed,
+    state: passed ? "PASS" : "FAIL",
     actual: totalPaise,
     limit: limitPaise,
     message: passed
@@ -107,6 +109,7 @@ export function checkMerchant(
   return {
     name: "MERCHANT_AUTHORIZED",
     passed,
+    state: passed ? "PASS" : "FAIL",
     actual: merchantId,
     limit: allowedMerchantsJSON,
     message: reason,
@@ -118,6 +121,7 @@ export function checkQuantity(quantity: number, maxQuantity: number): PolicyChec
   return {
     name: "MAX_QUANTITY",
     passed,
+    state: passed ? "PASS" : "FAIL",
     actual: quantity,
     limit: maxQuantity,
     message: passed
@@ -131,6 +135,7 @@ export function checkCurrency(currency: string, policyCurrency: string): PolicyC
   return {
     name: "CURRENCY_MATCH",
     passed,
+    state: passed ? "PASS" : "FAIL",
     actual: currency,
     limit: policyCurrency,
     message: passed
@@ -145,6 +150,7 @@ export function checkExpiration(expiresAt: Date | null): PolicyCheckResult {
   return {
     name: "POLICY_ACTIVE",
     passed,
+    state: passed ? "PASS" : "FAIL",
     actual: now.toISOString(),
     limit: expiresAt ? expiresAt.toISOString() : null,
     message: passed
@@ -157,18 +163,30 @@ export function checkDelivery(
   deliveryEstimateDays: number | null | undefined,
   maxDeliveryDays: number | null | undefined
 ): PolicyCheckResult {
-  const limitDays = maxDeliveryDays ?? 3; // Default 3 day delivery limit if undefined
-  const estimateDays = deliveryEstimateDays ?? 7; // Treat unknown/undefined delivery as slow (7 days)
+  if (maxDeliveryDays === undefined || maxDeliveryDays === null) {
+    return {
+      name: "DELIVERY_SPEED",
+      passed: true,
+      state: "NOT_REQUESTED",
+      actual: deliveryEstimateDays ?? "unknown",
+      limit: null,
+      message: "Delivery requirement not requested",
+    };
+  }
+
+  const limitDays = maxDeliveryDays;
+  const estimateDays = deliveryEstimateDays ?? 7; 
 
   const passed = estimateDays <= limitDays;
   return {
     name: "DELIVERY_SPEED",
     passed,
+    state: passed ? "PASS" : "FAIL",
     actual: deliveryEstimateDays ?? "unknown",
     limit: limitDays,
     message: passed
-      ? `Delivery estimate is within the allowed limit of ${limitDays} days.`
-      : `Delivery speed (${deliveryEstimateDays ?? "unknown"} days) exceeds the limit of ${limitDays} days.`,
+      ? `Delivery estimate is within the requested limit of ${limitDays} days.`
+      : `Delivery speed (${deliveryEstimateDays ?? "unknown"} days) exceeds the requested limit of ${limitDays} days.`,
   };
 }
 
@@ -219,8 +237,8 @@ export function evaluatePurchasePolicy(params: PolicyEvaluationParams): PolicyEv
     reasons.push(expirationCheck.message);
   }
 
-  // 6. Delivery Check (default limit 3 days if maxDeliveryDays not set)
-  const deliveryLimit = params.maxDeliveryDays ?? 3;
+  // 6. Delivery Check
+  const deliveryLimit = params.maxDeliveryDays;
   const deliveryCheck = checkDelivery(params.deliveryEstimateDays, deliveryLimit);
   checks.push(deliveryCheck);
   if (!deliveryCheck.passed) {

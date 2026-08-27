@@ -49,12 +49,14 @@ Guidelines:
 1. Extract shopping constraints strictly. Do not invent details.
 2. Conversation State Rules (Refinement vs New Request):
    - Refinements (e.g. "make it cheaper", "under 300", "only flipkart") must inherit the previous category, query, and preferences.
-   - New Requests (e.g. "I want a cricket bat", "Find me a laptop", "I need a phone") MUST clear/reset the previous budget (maxBudgetPaise and minBudgetPaise), category, subcategory, preferences, query, recipient, and age. Do NOT inherit the previous budget unless a new budget is explicitly mentioned in the new request.
-   - If a new request is too vague (e.g. "I want a gift for a 12 year old boy" with no interests specified), set "isComplete" to false and ask a concise clarification: "What kind of gift does he like, and do you have a target budget?" instead of silently inheriting the previous subject (like chess).
+   - New Requests (e.g. "I want a cricket bat", "Find me a laptop", "I need a phone") MUST clear/reset the previous budget (maxBudgetPaise and minBudgetPaise), maxDeliveryDays, category, subcategory, preferences, query, recipient, and age. Do NOT inherit the previous constraints unless explicitly mentioned.
+   - If a new request is too vague, set "isComplete" to false and ask a concise clarification.
 3. Budget Extraction:
-   - Convert all budgets mentioned in Rupees (e.g., "under 500", "₹1000", "rs. 800", "below 1500") into Paise (1 INR = 100 Paise).
-4. Objective Detection:
-   - Map terms like "cheapest", "lowest price", "least cost" to "cheapest".
+   - Convert all budgets mentioned in Rupees (e.g., "under 500", "₹1000", "rs. 800") into Paise (1 INR = 100 Paise).
+4. Delivery Constraint Extraction:
+   - Only set maxDeliveryDays if the user explicitly asks for a delivery deadline (e.g., "within 3 days" = 3, "tomorrow" = 1). Otherwise, set it to null.
+5. Objective Detection:
+   - Map terms like "cheapest" to "cheapest".
    - Map terms like "fastest", "arrive tomorrow" to "fastest".
    - Map terms like "highest rated", "best quality" to "highest_quality".
    - Default to "best_value".
@@ -238,7 +240,7 @@ function hasAnyWord(text: string, words: string[]): boolean {
  * Local parser to resolve basic queries if OpenAI is missing or times out.
  * Strictly enforces refinement vs new request context merging.
  */
-function runLocalFallback(message: string, history: ChatMessage[] = []): ModelResponse {
+export function runLocalFallback(message: string, history: ChatMessage[] = []): ModelResponse {
   const currentMsgLower = message.toLowerCase().trim();
   
   // 1. Detect if the current message represents a new request or intent context override using classifyMessage
@@ -246,11 +248,24 @@ function runLocalFallback(message: string, history: ChatMessage[] = []): ModelRe
   const isNewRequest = messageType === "NEW_REQUEST";
  
   // 2. Build full lookup text based on refinement state
+  let relevantHistory: string[] = [];
+  if (!isNewRequest) {
+    for (let i = history.length - 1; i >= 0; i--) {
+      if (history[i].role !== "user") continue;
+      const hType = classifyMessage(history[i].content);
+      relevantHistory.unshift(history[i].content);
+      if (hType === "NEW_REQUEST") {
+        break; // Stop at the last new request subject
+      }
+    }
+  }
+  
   let textForFilters = currentMsgLower;
   if (!isNewRequest) {
-    // If it's a refinement (e.g. "under 500", "make it cheaper"), include history to preserve item context
-    textForFilters = [...history.filter(h => h.role === "user").map(h => h.content), message].join(" ").toLowerCase();
+    textForFilters = [...relevantHistory, message].join(" ").toLowerCase();
   }
+  
+  const historyText = relevantHistory.join(" ").toLowerCase();
  
   // 3. Subject verification for completion state
   const hasSpecificSubject = /\b(chess|cricket|bats?|balls?|headphones?|wireless|audio|earbuds?|tws|laptops?|notebooks?|computers?|phones?|smartphones?|mobiles?|smartwatch(?:es)?|watch(?:es)?|shoes?|footwear|sneakers?|runners?|running|books?|novels?|fiction|backpacks?|bags?|kitchen|cookers?|kettles?|grinders?|vacuums?|appliances?|fashion|clothing|shirts?|jeans|polo|travel|suitcases?|luggage|journals?)\b/i.test(textForFilters);
@@ -286,8 +301,7 @@ function runLocalFallback(message: string, history: ChatMessage[] = []): ModelRe
   if (ageMatch) {
     recipientAge = parseInt(ageMatch[1], 10);
   } else if (!isNewRequest) {
-    // Inherit from history only if it's not a new request
-    const historyText = history.filter(h => h.role === "user").map(h => h.content).join(" ").toLowerCase();
+    // Inherit from relevant history only
     const historyAgeMatch = historyText.match(/(\d+)\s*-?\s*year/i);
     if (historyAgeMatch) {
       recipientAge = parseInt(historyAgeMatch[1], 10);
@@ -363,15 +377,13 @@ function runLocalFallback(message: string, history: ChatMessage[] = []): ModelRe
 
   // 8. Source preference filtering
   let sourcePreference: string | null = null;
-  if (textForFilters.includes("flipkart")) {
-    sourcePreference = "Flipkart";
-  } else if (textForFilters.includes("amazon")) {
-    sourcePreference = "Amazon";
+  if (textForFilters.includes("ebay")) {
+    sourcePreference = "eBay";
+  } else if (textForFilters.includes("synthetic") || textForFilters.includes("bazaar")) {
+    sourcePreference = "synthetic";
   } else if (!isNewRequest) {
-    // Inherit from history only for refinements
-    const historyText = history.filter(h => h.role === "user").map(h => h.content).join(" ").toLowerCase();
-    if (historyText.includes("flipkart")) sourcePreference = "Flipkart";
-    else if (historyText.includes("amazon")) sourcePreference = "Amazon";
+    if (historyText.includes("ebay")) sourcePreference = "eBay";
+    else if (historyText.includes("synthetic") || historyText.includes("bazaar")) sourcePreference = "synthetic";
   }
 
   // 9. Delivery constraints extraction
@@ -385,8 +397,6 @@ function runLocalFallback(message: string, history: ChatMessage[] = []): ModelRe
   } else if (textForFilters.includes("fast") || textForFilters.includes("express")) {
     maxDeliveryDays = 3; // default for fast/express
   } else if (!isNewRequest) {
-    // Inherit from history only for refinements
-    const historyText = history.filter(h => h.role === "user").map(h => h.content).join(" ").toLowerCase();
     if (historyText.includes("delivery tomorrow") || historyText.includes("tomorrow") || historyText.includes("1 day") || historyText.includes("one day")) {
       maxDeliveryDays = 1;
     } else if (historyText.includes("2 days") || historyText.includes("two days")) {
@@ -406,10 +416,31 @@ function runLocalFallback(message: string, history: ChatMessage[] = []): ModelRe
   if (textForFilters.includes("battery")) preferences.push("battery life");
   if (textForFilters.includes("delivery")) preferences.push("fast delivery");
 
+  // 11. Core query extraction
+  let coreQuery = "";
+  if (isNewRequest) {
+    coreQuery = currentMsgLower
+      .replace(/\(search only [^)]+\)/gi, "")
+      .replace(/\b(i want|find me|on ebay|from ebay|search ebay|search|show me|looking for|i need|need|a|an|the|some|can you|please|for|me)\b/gi, "")
+      .replace(/\b(headphone)\b/gi, "headphones")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!coreQuery) coreQuery = subcategory || category || currentMsgLower;
+  } else {
+    const rawHistory = history[0]?.content || preferences[0] || message.slice(0, 100);
+    coreQuery = rawHistory
+      .replace(/\(search only [^)]+\)/gi, "")
+      .replace(/\b(i want|find me|on ebay|from ebay|search ebay|search|show me|looking for|i need|need|a|an|the|some|can you|please|for|me)\b/gi, "")
+      .replace(/\b(headphone)\b/gi, "headphones")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!coreQuery) coreQuery = subcategory || category || rawHistory;
+  }
+
   return {
     isComplete: true,
     extractedIntent: {
-      query: isNewRequest ? currentMsgLower : (history[0]?.content || preferences[0] || message.slice(0, 100)),
+      query: coreQuery,
       category,
       subcategory,
       preferences,

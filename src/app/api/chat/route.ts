@@ -91,12 +91,14 @@ export async function POST(req: Request) {
     });
 
     // 3. Map Intent to Search parameters
+    const providerStatuses: Record<string, string> = {};
     const searchParams: SearchParams = {
       query: intent.query || undefined,
       category: intent.category || undefined,
       maxPricePaise: intent.maxBudgetPaise || undefined,
       maxDeliveryDays: intent.maxDeliveryDays || undefined,
       source: intent.sourcePreference ? intent.sourcePreference.toUpperCase() : undefined,
+      providerStatuses,
     };
 
     // 4. Query Commerce Service
@@ -149,6 +151,7 @@ export async function POST(req: Request) {
       type: "recommendations",
       intent,
       correlationId,
+      providerStatuses,
       recommendations: rankedOffers.map(ro => ({
         offerId: ro.offer.offerId,
         productName: ro.offer.productName,
@@ -162,6 +165,15 @@ export async function POST(req: Request) {
         isRazorpayEnabled: ro.offer.isRazorpayEnabled,
         source: ro.offer.source,
         pricePaise: ro.offer.pricePaise,
+        currency: ro.offer.currency,
+        originalPricePaise: ro.offer.originalPricePaise,
+        originalCurrency: ro.offer.originalCurrency,
+        displayPricePaise: ro.offer.displayPricePaise,
+        displayShippingCostPaise: ro.offer.displayShippingCostPaise,
+        displayCurrency: ro.offer.displayCurrency,
+        fxRate: ro.offer.fxRate,
+        fxRateDate: ro.offer.fxRateDate,
+        fxError: ro.offer.fxError,
         shippingCostPaise: ro.offer.shippingCostPaise,
         deliveryEstimate: ro.offer.deliveryEstimate,
         sellerRating: ro.offer.sellerRating,
