@@ -38,6 +38,7 @@ interface OfferItem {
   imageUrl: string | null;
   priceFetchedAt: Date;
   scoreBreakdown: any;
+  canonicalProductId?: string;
 }
 
 interface ChatMessage {
@@ -47,6 +48,7 @@ interface ChatMessage {
   type?: "text" | "clarification" | "recommendations";
   recommendations?: OfferItem[];
   intent?: any;
+  crossSells?: any[];
 }
 
 // Global utility helper to format price in INR currency
@@ -91,6 +93,9 @@ export default function Home() {
 
   // Policy evaluations mapping offerId to parsed response
   const [policyEvaluations, setPolicyEvaluations] = useState<Record<string, any>>({});
+  const [basketAdditions, setBasketAdditions] = useState<Record<string, any[]>>({});
+  const [basketQuantities, setBasketQuantities] = useState<Record<string, number>>({});
+  const [primaryAddedMap, setPrimaryAddedMap] = useState<Record<string, boolean>>({});
   
   // Active prepare approvals mapping offerId to approval object
   const [currentApprovals, setCurrentApprovals] = useState<Record<string, any>>({});
@@ -222,14 +227,50 @@ export default function Home() {
 
 
 
-  const fetchPolicyForOffer = async (offerId: string) => {
+  const fetchPolicyForOffer = async (
+    offerId: string, 
+    customBasket?: any[], 
+    customQuantities?: Record<string, number>,
+    customPrimaryAdded?: boolean
+  ) => {
     try {
+      const bsk = customBasket || basketAdditions[offerId] || [];
+      const qtyMap = customQuantities || basketQuantities;
+      const isPrimaryAdded = customPrimaryAdded !== undefined ? customPrimaryAdded : !!primaryAddedMap[offerId];
+      const primaryQty = qtyMap[offerId] || 1;
+
+      const payloadBasket: any[] = [];
+      if (isPrimaryAdded) {
+        payloadBasket.push({ offerId, quantity: primaryQty });
+      }
+      bsk.forEach(cs => {
+        payloadBasket.push({
+          offerId: cs.offer.offerId,
+          quantity: qtyMap[cs.offer.offerId] || 1
+        });
+      });
+
+      if (payloadBasket.length === 0) {
+        setPolicyEvaluations((prev) => {
+          const updated = { ...prev };
+          delete updated[offerId];
+          return updated;
+        });
+        setCurrentApprovals((prev) => {
+          const updated = { ...prev };
+          delete updated[offerId];
+          return updated;
+        });
+        return;
+      }
+
       const res = await fetch("/api/payment/prepare", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           offerId,
-          quantity: 1,
+          quantity: primaryQty,
+          basket: payloadBasket,
           policyId: "default-policy",
           correlationId: currentCorrelationId || undefined
         }),
@@ -239,6 +280,13 @@ export default function Home() {
         setPolicyEvaluations((prev) => ({ ...prev, [offerId]: data }));
         if (data.allowed && data.approval) {
           setCurrentApprovals((prev) => ({ ...prev, [offerId]: data.approval }));
+        } else {
+          // Clear approval if not allowed
+          setCurrentApprovals((prev) => {
+            const updated = { ...prev };
+            delete updated[offerId];
+            return updated;
+          });
         }
         if (data.correlationId) {
           setCurrentCorrelationId(data.correlationId);
@@ -433,6 +481,16 @@ export default function Home() {
       return copy;
     });
     setCheckoutLoaderMap((prev) => {
+      const copy = { ...prev };
+      delete copy[offerId];
+      return copy;
+    });
+    setPrimaryAddedMap((prev) => {
+      const copy = { ...prev };
+      delete copy[offerId];
+      return copy;
+    });
+    setBasketAdditions((prev) => {
       const copy = { ...prev };
       delete copy[offerId];
       return copy;
@@ -813,6 +871,83 @@ export default function Home() {
       ? recs.find(o => o.offerId === selectedWinnerOfferId) || sortedOffers[0]
       : sortedOffers[0];
 
+    const addedCrossSells = basketAdditions[winner.offerId] || [];
+    const isPrimaryAdded = !!primaryAddedMap[winner.offerId];
+    const primaryQty = basketQuantities[winner.offerId] || 1;
+
+    const formatBasketItemUnitPrice = (item: any) => {
+      const isEbay = item.source?.toLowerCase() === 'ebay';
+      const pricePaise = item.pricePaise || item.displayPricePaise || 0;
+      if (isEbay) {
+        const usdPriceStr = `$${(pricePaise / 100).toFixed(2)} USD`;
+        if (item.displayCurrency === 'INR' && item.displayPricePaise) {
+          return `${formatPrice(item.displayPricePaise)} approx. (${usdPriceStr})`;
+        }
+        return usdPriceStr;
+      }
+      return formatPrice(pricePaise);
+    };
+
+    const formatBasketItemPrice = (item: any, quantity: number) => {
+      const isEbay = item.source?.toLowerCase() === 'ebay';
+      const pricePaise = item.pricePaise || item.displayPricePaise || 0;
+      const totalItemPaise = pricePaise * quantity;
+      
+      if (isEbay) {
+        const usdPriceStr = `$${(totalItemPaise / 100).toFixed(2)} USD`;
+        if (item.displayCurrency === 'INR' && item.displayPricePaise) {
+          const inrPricePaise = item.displayPricePaise * quantity;
+          return `${formatPrice(inrPricePaise)} approx. (${usdPriceStr})`;
+        }
+        return usdPriceStr;
+      }
+      return formatPrice(totalItemPaise);
+    };
+
+    let itemCount = 0;
+    let basketSubtotalPaise = 0;
+    if (isPrimaryAdded) {
+      itemCount += primaryQty;
+      basketSubtotalPaise += winner.pricePaise * primaryQty;
+    }
+    addedCrossSells.forEach((cs: any) => {
+      const qty = basketQuantities[cs.offer.offerId] || 1;
+      itemCount += qty;
+      basketSubtotalPaise += cs.offer.pricePaise * qty;
+    });
+
+    const updateQuantity = (itemOfferId: string, delta: number) => {
+      setBasketQuantities((prev) => {
+        const current = prev[itemOfferId] || 1;
+        const next = Math.max(1, current + delta);
+        const updated = { ...prev, [itemOfferId]: next };
+        fetchPolicyForOffer(winner.offerId, addedCrossSells, updated, isPrimaryAdded);
+        return updated;
+      });
+    };
+
+    const handleRemoveCrossSell = (itemOfferId: string) => {
+      const updatedBasket = addedCrossSells.filter((x: any) => x.offer.offerId !== itemOfferId);
+      setBasketAdditions((prev) => ({ ...prev, [winner.offerId]: updatedBasket }));
+      fetchPolicyForOffer(winner.offerId, updatedBasket, basketQuantities, isPrimaryAdded);
+    };
+
+    const handleRemovePrimary = () => {
+      setPrimaryAddedMap((prev) => {
+        const updated = { ...prev, [winner.offerId]: false };
+        fetchPolicyForOffer(winner.offerId, addedCrossSells, basketQuantities, false);
+        return updated;
+      });
+    };
+
+    const handleAddPrimary = () => {
+      setPrimaryAddedMap((prev) => {
+        const updated = { ...prev, [winner.offerId]: true };
+        fetchPolicyForOffer(winner.offerId, addedCrossSells, basketQuantities, true);
+        return updated;
+      });
+    };
+
     // Compute tradeoff string
     let tradeoffText = "";
     if (winner && cheapest && fastest) {
@@ -897,6 +1032,7 @@ export default function Home() {
     }
 
     const evaluation = policyEvaluations[winner.offerId];
+    const evaluationTotalPaise = evaluation?.totalPaise || (winner.pricePaise + winner.shippingCostPaise);
     const approval = currentApprovals[winner.offerId];
     const confirm = confirmStatus[winner.offerId];
     const isConfirming = isConfirmingMap[winner.offerId];
@@ -995,14 +1131,129 @@ export default function Home() {
             </div>
           </div>
 
+          {/* Basket UI Component */}
+          {(addedCrossSells.length > 0 || isPrimaryAdded) && (
+            <div className="mt-5 bg-white border border-[#E6E0D6] rounded-xl p-5 shadow-sm text-left">
+              <div className="flex justify-between items-center border-b border-[#F3F4F6] pb-3 mb-4">
+                <div className="flex items-center gap-2">
+                  <ShoppingCart className="w-4 h-4 text-[#172033]" />
+                  <span className="font-bold text-sm text-[#172033]">Your Basket</span>
+                </div>
+                <span className="text-[10px] font-bold bg-[#F7F4EE] text-[#172033] px-2.5 py-0.5 rounded-full">
+                  {itemCount} {itemCount === 1 ? "item" : "items"}
+                </span>
+              </div>
+
+              <div className="space-y-4">
+                {/* Primary Item Row */}
+                {isPrimaryAdded ? (
+                  <div className="flex justify-between items-center gap-4 text-xs pb-3 border-b border-[#F3F4F6]">
+                    <div className="flex-1">
+                      <div className="font-semibold text-[#172033]">{winner.productName}</div>
+                      <div className="text-[10px] text-[#667085] mt-0.5">
+                        {winner.source} • Unit Price: {formatBasketItemUnitPrice(winner)}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <div className="flex items-center gap-1 border border-[#D1D5DB] rounded bg-white">
+                        <button
+                          onClick={() => updateQuantity(winner.offerId, -1)}
+                          className="px-2 py-0.5 text-xs hover:bg-[#F3F4F6] font-bold text-[#172033]"
+                        >
+                          -
+                        </button>
+                        <span className="px-1 text-xs text-[#172033] font-semibold">{primaryQty}</span>
+                        <button
+                          onClick={() => updateQuantity(winner.offerId, 1)}
+                          className="px-2 py-0.5 text-xs hover:bg-[#F3F4F6] font-bold text-[#172033]"
+                        >
+                          +
+                        </button>
+                      </div>
+                      <span className="font-bold text-[#172033] w-16 text-right">
+                        {formatBasketItemPrice(winner, primaryQty)}
+                      </span>
+                      <button
+                        onClick={handleRemovePrimary}
+                        className="text-red-500 hover:text-red-700 font-bold ml-2 text-[10px]"
+                      >
+                        REMOVE
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-xs text-[#667085] italic py-1 border-b border-[#F3F4F6] flex justify-between items-center">
+                    <span>Primary item removed from basket</span>
+                    <button
+                      onClick={handleAddPrimary}
+                      className="text-[10px] font-bold text-[#079669] hover:underline"
+                    >
+                      + ADD BACK
+                    </button>
+                  </div>
+                )}
+
+                {/* Cross Sell Rows */}
+                {addedCrossSells.map((cs: any) => {
+                  const qty = basketQuantities[cs.offer.offerId] || 1;
+                  return (
+                    <div key={cs.offer.offerId} className="flex justify-between items-center gap-4 text-xs pb-3 border-b border-[#F3F4F6]">
+                      <div className="flex-1">
+                        <div className="font-semibold text-[#172033]">{cs.offer.productName}</div>
+                        <div className="text-[10px] text-[#667085] mt-0.5">
+                          {cs.offer.source} • Unit Price: {formatBasketItemUnitPrice(cs.offer)}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <div className="flex items-center gap-1 border border-[#D1D5DB] rounded bg-white">
+                          <button
+                            onClick={() => updateQuantity(cs.offer.offerId, -1)}
+                            className="px-2 py-0.5 text-xs hover:bg-[#F3F4F6] font-bold text-[#172033]"
+                          >
+                            -
+                          </button>
+                          <span className="px-1 text-xs text-[#172033] font-semibold">{qty}</span>
+                          <button
+                            onClick={() => updateQuantity(cs.offer.offerId, 1)}
+                            className="px-2 py-0.5 text-xs hover:bg-[#F3F4F6] font-bold text-[#172033]"
+                          >
+                            +
+                          </button>
+                        </div>
+                        <span className="font-bold text-[#172033] w-16 text-right">
+                          {formatBasketItemPrice(cs.offer, qty)}
+                        </span>
+                        <button
+                          onClick={() => handleRemoveCrossSell(cs.offer.offerId)}
+                          className="text-red-500 hover:text-red-700 font-bold ml-2 text-[10px]"
+                        >
+                          REMOVE
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="mt-4 pt-3 flex justify-between items-center text-xs font-bold text-[#172033] border-t border-[#F3F4F6]">
+                <span>Basket Subtotal:</span>
+                <span className="text-base text-[#172033]">
+                  {winner.source.toLowerCase() === 'ebay'
+                    ? formatBasketItemPrice(winner, primaryQty)
+                    : formatPrice(basketSubtotalPaise)
+                  }
+                </span>
+              </div>
+            </div>
+          )}
+
           {/* POLICY ENGINE VERIFICATION AREA */}
-          {winner.source.toLowerCase() !== "ebay" && (
-            evaluation ? (
-              <div className="mt-5 border-t border-[#F3F4F6] pt-4 flex flex-col gap-3">
-                {evaluation.allowed ? (
-                  <div className="flex flex-col gap-3">
-                    <span className="text-[10px] text-[#079669] font-bold uppercase tracking-wider flex items-center gap-1.5">
-                      <ShieldCheck className="w-4 h-4 text-[#079669]" />
+          {evaluation ? (
+            <div className="mt-5 border-t border-[#F3F4F6] pt-4 flex flex-col gap-3">
+              {evaluation.allowed ? (
+                <div className="flex flex-col gap-3">
+                  <span className="text-[10px] text-[#079669] font-bold uppercase tracking-wider flex items-center gap-1.5">
+                    <ShieldCheck className="w-4 h-4 text-[#079669]" />
                     <span>PURCHASE PROTECTED</span>
                   </span>
                   
@@ -1022,7 +1273,12 @@ export default function Home() {
                   <div className="bg-white border border-[#F3F4F6] rounded-lg p-3.5 flex flex-col gap-2 text-xs mt-1">
                     <div className="flex justify-between">
                       <span className="text-[#667085]">Purchase total:</span>
-                      <span className="text-[#172033] font-semibold">{formatOfferPrice(winner, winner.pricePaise + winner.shippingCostPaise)}</span>
+                      <span className="text-[#172033] font-semibold">
+                        {winner.source.toLowerCase() === 'ebay' && winner.displayCurrency === 'INR' && winner.displayPricePaise
+                          ? `${formatPrice(Math.round(evaluationTotalPaise * (winner.displayPricePaise / winner.pricePaise)))} approx. ($${(evaluationTotalPaise / 100).toFixed(2)} USD)`
+                          : formatPrice(evaluationTotalPaise)
+                        }
+                      </span>
                     </div>
                     {evaluation.userRequestedBudget !== undefined && evaluation.userRequestedBudget !== null && (
                       <div className="flex justify-between">
@@ -1039,7 +1295,7 @@ export default function Home() {
                       <span className="text-emerald-400">{formatPrice(evaluation.effectiveLimit)}</span>
                     </div>
                     <div className="text-[10px] text-[#079669] font-bold mt-1 text-center">
-                      ✓ Within effective limit
+                      ✓ Amount is within effective limit
                     </div>
                   </div>
                 </div>
@@ -1051,12 +1307,10 @@ export default function Home() {
                   </span>
 
                   <div className="flex flex-col gap-1.5 text-left">
-                    {evaluation.checks.map((chk: any) => (
+                    {evaluation.checks.filter((chk: any) => !chk.passed).map((chk: any) => (
                       <div key={chk.name} className="flex items-start gap-1.5 text-xs">
-                        <span className={chk.state === "NOT_REQUESTED" ? "text-slate-400 font-bold select-none" : chk.passed ? "text-[#079669] font-bold select-none" : "text-[#D64545] font-bold select-none"}>
-                          {chk.state === "NOT_REQUESTED" ? "—" : chk.passed ? "✓" : "✗"}
-                        </span>
-                        <span className={chk.state === "NOT_REQUESTED" ? "text-[#667085] italic" : chk.passed ? "text-[#667085]" : "text-[#D64545] font-semibold"}>
+                        <span className="text-[#D64545] font-bold select-none">✗</span>
+                        <span className="text-[#D64545] font-semibold">
                           {chk.message}
                         </span>
                       </div>
@@ -1065,8 +1319,13 @@ export default function Home() {
 
                   <div className="bg-white border border-[#F3F4F6] rounded-lg p-3.5 flex flex-col gap-2 text-xs mt-1">
                     <div className="flex justify-between">
-                      <span className="text-[#667085]">Product total:</span>
-                      <span className="text-[#D64545] font-semibold">{formatOfferPrice(winner, winner.pricePaise + winner.shippingCostPaise)}</span>
+                      <span className="text-[#667085]">Basket total:</span>
+                      <span className="text-[#D64545] font-semibold">
+                        {winner.source.toLowerCase() === 'ebay' && winner.displayCurrency === 'INR' && winner.displayPricePaise
+                          ? `${formatPrice(Math.round(evaluationTotalPaise * (winner.displayPricePaise / winner.pricePaise)))} approx. ($${(evaluationTotalPaise / 100).toFixed(2)} USD)`
+                          : formatPrice(evaluationTotalPaise)
+                        }
+                      </span>
                     </div>
                     {evaluation.userRequestedBudget !== undefined && evaluation.userRequestedBudget !== null && (
                       <div className="flex justify-between">
@@ -1080,26 +1339,30 @@ export default function Home() {
                     </div>
                     <div className="flex justify-between border-t border-[#F3F4F6] pt-1.5 font-bold">
                       <span className="text-[#667085]">Effective limit:</span>
-                      <span className={evaluation.effectiveLimit && (winner.pricePaise + winner.shippingCostPaise) > evaluation.effectiveLimit ? "text-[#D64545]" : "text-emerald-400"}>
+                      <span className="text-[#D64545] font-semibold">
                         {formatPrice(evaluation.effectiveLimit)}
                       </span>
                     </div>
-                    {evaluation.effectiveLimit && (winner.pricePaise + winner.shippingCostPaise) > evaluation.effectiveLimit ? (
-                      <div className="text-[10px] text-[#D64545] font-bold mt-1 text-center">
-                        ✕ Exceeds effective limit
-                      </div>
-                    ) : (
-                      <div className="text-[10px] text-emerald-400 font-bold mt-1 text-center">
-                        ✓ Amount is within effective limit
-                      </div>
-                    )}
+                    {(() => {
+                      const conv = winner.source.toLowerCase() === 'ebay' && winner.displayCurrency === 'INR' && winner.displayPricePaise
+                        ? (winner.displayPricePaise / winner.pricePaise)
+                        : 1;
+                      const totalINR = evaluationTotalPaise * conv;
+                      if (evaluation.effectiveLimit && totalINR > evaluation.effectiveLimit) {
+                        return (
+                          <>
+                            <div className="text-[10px] text-[#D64545] font-bold mt-1 text-center">
+                              ✕ Exceeds effective limit
+                            </div>
+                            <div className="text-xs text-[#D64545] italic font-semibold mt-1 border-t border-red-900/10 pt-2 text-center">
+                              Exceeds budget limit by {formatPrice(Math.round(totalINR - evaluation.effectiveLimit))}.
+                            </div>
+                          </>
+                        );
+                      }
+                      return null;
+                    })()}
                   </div>
-
-                  {evaluation.effectiveLimit && (winner.pricePaise + winner.shippingCostPaise) > evaluation.effectiveLimit && (
-                    <p className="text-xs text-[#D64545] italic font-semibold mt-1">
-                      {formatOfferPrice(winner, winner.pricePaise + winner.shippingCostPaise)} exceeds your {evaluation.userRequestedBudget ? "requested" : "effective"} {formatPrice(evaluation.userRequestedBudget || evaluation.effectiveLimit)} budget by {formatPrice((winner.pricePaise + winner.shippingCostPaise) - (evaluation.userRequestedBudget || evaluation.effectiveLimit))}.
-                    </p>
-                  )}
                 </div>
               )}
             </div>
@@ -1108,7 +1371,6 @@ export default function Home() {
               <div className="w-3.5 h-3.5 border-2 border-[#E5E7EB] border-t-[#172033] rounded-full animate-spin" />
               <span>Verifying purchase policies server-side...</span>
             </div>
-          )
           )}
 
           {/* DYNAMIC CONFIRMATION AND PAYMENT FLOW UI */}
@@ -1294,103 +1556,191 @@ export default function Home() {
             </div>
           )}
 
+          {/* Growth Agent Cross-Sells */}
+          {message.crossSells && message.crossSells.length > 0 && !evaluation && (
+            <div className="mt-4 bg-[#F9FAFB] border border-[#E5E7EB] rounded-xl p-4 flex flex-col gap-3">
+              <span className="text-[9px] text-[#079669] font-bold uppercase tracking-wider flex items-center gap-1.5">
+                <TrendingUp className="w-3.5 h-3.5 text-[#079669]" />
+                <span>Frequently Bought Together</span>
+              </span>
+              
+              {message.crossSells.map((cs: any) => {
+                const added = basketAdditions[winner.offerId]?.some(x => x.offer.offerId === cs.offer.offerId) || false;
+                return (
+                  <div key={cs.offer.offerId} className="flex flex-col gap-2 p-3 bg-white border border-[#E5E7EB] rounded-lg shadow-sm">
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <span className="text-[10px] text-[#667085] uppercase">{cs.offer.brand}</span>
+                        <h5 className="text-[#172033] font-semibold text-xs leading-tight">{cs.offer.productName}</h5>
+                        <p className="text-[#667085] text-[10px] mt-0.5">{cs.reasons[0]}</p>
+                      </div>
+                      <span className="text-[#172033] font-bold text-xs shrink-0 ml-3">
+                        {formatPrice(cs.offer.pricePaise + cs.offer.shippingCostPaise)}
+                      </span>
+                    </div>
+                    <button 
+                      onClick={() => {
+                        setBasketAdditions(prev => {
+                          const curr = prev[winner.offerId] || [];
+                          if (added) {
+                            const updated = curr.filter(x => x.offer.offerId !== cs.offer.offerId);
+                            fetchPolicyForOffer(winner.offerId, updated, basketQuantities, isPrimaryAdded);
+                            return { ...prev, [winner.offerId]: updated };
+                          } else {
+                            const updated = [...curr, cs];
+                            fetch("/api/merchant/events", {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({
+                                eventType: "CROSS_SELL_ADDED",
+                                sessionId: currentCorrelationId || undefined,
+                                source: cs.offer.source,
+                                offerId: cs.offer.offerId,
+                                productId: cs.offer.canonicalProductId,
+                                merchantId: cs.offer.merchantId,
+                                amount: cs.offer.pricePaise + cs.offer.shippingCostPaise
+                              })
+                            }).catch(err => console.error("Failed to log event:", err));
+                            fetchPolicyForOffer(winner.offerId, updated, basketQuantities, isPrimaryAdded);
+                            return { ...prev, [winner.offerId]: updated };
+                          }
+                        });
+                      }}
+                      className={`w-full py-1.5 rounded text-[10px] font-bold transition-all border ${added ? 'bg-[#079669] border-[#079669] text-white' : 'bg-white border-[#D1D5DB] text-[#172033] hover:bg-[#F9FAFB]'}`}
+                    >
+                      {added ? '✓ ADDED' : '+ ADD'}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
           {/* Actions Section */}
           <div className="mt-5 flex flex-wrap items-center gap-3">
-            {winner.source.toLowerCase() === "ebay" ? (
-              <a
-                href={winner.productUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="w-full bg-blue-600 hover:bg-blue-700 text-[#FFFDF9] px-5 py-2.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow text-center"
-              >
-                <ExternalLink className="w-4 h-4" />
-                <span>VIEW ON EBAY</span>
-              </a>
-            ) : !evaluation ? (
+            {!isPrimaryAdded ? (
               <button
-                onClick={() => fetchPolicyForOffer(winner.offerId)}
+                onClick={handleAddPrimary}
                 className="w-full flex items-center justify-center gap-1.5 bg-[#172033] hover:bg-[#172033]/90 text-[#FFFDF9] px-5 py-2.5 rounded-lg text-xs font-bold transition-all shadow"
               >
                 <ShoppingCart className="w-3.5 h-3.5" />
-                <span>SELECT & BUY</span>
+                <span>ADD TO BASKET</span>
               </button>
-            ) : evaluation.allowed ? (
-              checkoutVerify && checkoutVerify.verified ? (
-                <div className="bg-[#052e16]/20 border border-emerald-955 text-emerald-400 px-4 py-2.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 w-full select-none">
-                  <ShieldCheck className="w-4 h-4" />
-                  <span>PAYMENT SUCCESSFUL</span>
+            ) : winner.source.toLowerCase() === "ebay" ? (
+              !evaluation ? (
+                <div className="w-full text-center text-xs text-[#667085]">
+                  Verifying policy limit for eBay basket...
                 </div>
-              ) : checkoutLoader ? (
-                <div className="bg-[#F7F5F0] border border-[#E5E7EB] text-[#667085] px-4 py-2.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-2.5 w-full select-none">
-                  <div className="w-3.5 h-3.5 border-2 border-[#E5E7EB] border-t-[#172033] rounded-full animate-spin" />
-                  <span>{checkoutLoader}</span>
-                </div>
-              ) : confirm ? (
-                confirm.status === "APPROVED" ? (
-                  <div className="w-full flex flex-col gap-1.5">
-                    <button
-                      onClick={() => handleRazorpayCheckout(winner.offerId)}
-                      className="w-full bg-emerald-600 hover:bg-emerald-700 text-[#172033] px-5 py-2.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow"
-                    >
-                      <CreditCard className="w-4 h-4 text-[#FFFDF9]" />
-                      <span>PAY WITH RAZORPAY (TEST MODE)</span>
-                    </button>
-                    <span className="text-[9px] text-[#667085] text-center uppercase tracking-wide font-semibold block animate-pulse">
-                      RAZORPAY TEST MODE
-                    </span>
-                  </div>
-                ) : (
-                  <button
-                    onClick={() => handleResetApprovalFlow(winner.offerId)}
-                    className="w-full bg-[#172033] hover:bg-[#172033]/90 text-[#FFFDF9] py-2.5 rounded-lg text-xs font-bold transition-all text-center flex items-center justify-center gap-1"
-                  >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                    <span>FIND ANOTHER OPTION</span>
-                  </button>
-                )
-              ) : approval ? (
-                <button
-                  onClick={() => handleConfirmPurchase(winner.offerId)}
-                  disabled={isConfirming}
-                  className="w-full flex items-center justify-center gap-1.5 bg-[#172033] hover:bg-[#172033]/90 text-[#FFFDF9] px-5 py-2.5 rounded-lg text-xs font-bold transition-all shadow"
+              ) : evaluation.allowed ? (
+                <a
+                  href={winner.productUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={() => {
+                    fetch("/api/merchant/events", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        eventType: "EBAY_CLICKED",
+                        sessionId: currentCorrelationId || undefined,
+                        source: "EBAY",
+                        offerId: winner.offerId,
+                        productId: winner.canonicalProductId,
+                        merchantId: winner.merchantId,
+                        amount: winner.pricePaise + winner.shippingCostPaise
+                      })
+                    }).catch(err => console.error("Failed to log eBay click event:", err));
+                  }}
+                  className="w-full bg-blue-600 hover:bg-blue-700 text-[#FFFDF9] px-5 py-2.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow text-center"
                 >
-                  {isConfirming ? (
-                    <>
-                      <div className="w-3.5 h-3.5 border-2 border-[#F3F4F6] border-t-[#FFFDF9] rounded-full animate-spin" />
-                      <span>Verifying Price Safety...</span>
-                    </>
-                  ) : (
-                    <>
-                      <ShieldCheck className="w-4 h-4" />
-                      <span>CONFIRM PURCHASE</span>
-                    </>
-                  )}
-                </button>
+                  <ExternalLink className="w-4 h-4" />
+                  <span>VIEW ON EBAY</span>
+                </a>
               ) : (
                 <div className="w-full flex flex-col gap-2">
-                  <button
-                    onClick={() => fetchPolicyForOffer(winner.offerId)}
-                    className="w-full flex items-center justify-center gap-1.5 bg-[#172033] hover:bg-[#172033]/90 text-[#FFFDF9] px-5 py-2.5 rounded-lg text-xs font-bold transition-all shadow"
-                  >
-                    <ShoppingCart className="w-3.5 h-3.5" />
-                    <span>SELECT & BUY</span>
-                  </button>
+                  <div className="bg-[#D64545]/10 border border-[#D64545]/30 rounded-lg p-3 text-center text-xs text-[#D64545] font-semibold flex items-center justify-center gap-2">
+                    <ShieldAlert className="w-4 h-4 text-[#D64545]" />
+                    <span>Purchase request violates active policy spending rules.</span>
+                  </div>
                 </div>
               )
             ) : (
-              <div className="w-full flex flex-col gap-2">
-                <div className="bg-[#D64545]/10 border border-[#D64545]/30 rounded-lg p-3 text-center text-xs text-[#D64545] font-semibold flex items-center justify-center gap-2">
-                  <ShieldAlert className="w-4 h-4 text-[#D64545]" />
-                  <span>Purchase request violates active policy spending rules.</span>
+              !evaluation ? (
+                <div className="w-full text-center text-xs text-[#667085]">
+                  Verifying policy limit...
                 </div>
-                <button
-                  onClick={() => handleResetApprovalFlow(winner.offerId)}
-                  className="w-full bg-[#172033] hover:bg-[#172033]/90 text-[#FFFDF9] px-5 py-2.5 rounded-lg text-xs font-bold transition-all text-center flex items-center justify-center gap-1 shadow"
-                >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                  <span>FIND ANOTHER OPTION</span>
-                </button>
-              </div>
+              ) : evaluation.allowed ? (
+                checkoutVerify && checkoutVerify.verified ? (
+                  <div className="bg-[#052e16]/20 border border-emerald-955 text-emerald-400 px-4 py-2.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 w-full select-none">
+                    <ShieldCheck className="w-4 h-4" />
+                    <span>PAYMENT SUCCESSFUL</span>
+                  </div>
+                ) : checkoutLoader ? (
+                  <div className="bg-[#F7F5F0] border border-[#E5E7EB] text-[#667085] px-4 py-2.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-2.5 w-full select-none">
+                    <div className="w-3.5 h-3.5 border-2 border-[#E5E7EB] border-t-[#172033] rounded-full animate-spin" />
+                    <span>{checkoutLoader}</span>
+                  </div>
+                ) : confirm ? (
+                  confirm.status === "APPROVED" ? (
+                    <div className="w-full flex flex-col gap-1.5">
+                      <button
+                        onClick={() => handleRazorpayCheckout(winner.offerId)}
+                        className="w-full bg-emerald-600 hover:bg-emerald-700 text-[#172033] px-5 py-2.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow"
+                      >
+                        <CreditCard className="w-4 h-4 text-[#FFFDF9]" />
+                        <span>PAY WITH RAZORPAY (TEST MODE)</span>
+                      </button>
+                      <span className="text-[9px] text-[#667085] text-center uppercase tracking-wide font-semibold block animate-pulse">
+                        RAZORPAY TEST MODE
+                      </span>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => handleResetApprovalFlow(winner.offerId)}
+                      className="w-full bg-[#172033] hover:bg-[#172033]/90 text-[#FFFDF9] py-2.5 rounded-lg text-xs font-bold transition-all text-center flex items-center justify-center gap-1"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span>FIND ANOTHER OPTION</span>
+                    </button>
+                  )
+                ) : approval ? (
+                  <button
+                    onClick={() => handleConfirmPurchase(winner.offerId)}
+                    disabled={isConfirming}
+                    className="w-full flex items-center justify-center gap-1.5 bg-[#172033] hover:bg-[#172033]/90 text-[#FFFDF9] px-5 py-2.5 rounded-lg text-xs font-bold transition-all shadow"
+                  >
+                    {isConfirming ? (
+                      <>
+                        <div className="w-3.5 h-3.5 border-2 border-[#F3F4F6] border-t-[#FFFDF9] rounded-full animate-spin" />
+                        <span>Verifying Price Safety...</span>
+                      </>
+                    ) : (
+                      <>
+                        <ShieldCheck className="w-4 h-4" />
+                        <span>CONFIRM PURCHASE</span>
+                      </>
+                    )}
+                  </button>
+                ) : (
+                  <div className="w-full text-center text-xs text-[#667085]">
+                    Authorization loading...
+                  </div>
+                )
+              ) : (
+                <div className="w-full flex flex-col gap-2">
+                  <div className="bg-[#D64545]/10 border border-[#D64545]/30 rounded-lg p-3 text-center text-xs text-[#D64545] font-semibold flex items-center justify-center gap-2">
+                    <ShieldAlert className="w-4 h-4 text-[#D64545]" />
+                    <span>Purchase request violates active policy spending rules.</span>
+                  </div>
+                  <button
+                    onClick={() => handleResetApprovalFlow(winner.offerId)}
+                    className="w-full bg-[#172033] hover:bg-[#172033]/90 text-[#FFFDF9] px-5 py-2.5 rounded-lg text-xs font-bold transition-all text-center flex items-center justify-center gap-1 shadow"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>RESET & START OVER</span>
+                  </button>
+                </div>
+              )
             )}
 
             {!confirm && (

@@ -1,12 +1,14 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
-import { evaluatePurchasePolicy } from "@/services/policy";
 import { createRazorpayOrderServer } from "@/lib/razorpay";
+import { evaluatePurchasePolicy } from "@/services/policy";
 import { recordAuditEvent } from "@/services/audit";
+import { recordCommerceEvent } from "@/services/events";
 
 const checkoutRequestSchema = z.object({
   approvalId: z.string().min(1, "Approval ID is required"),
+  correlationId: z.string().optional(),
 });
 
 export async function POST(req: Request) {
@@ -34,120 +36,80 @@ export async function POST(req: Request) {
     }
 
     const { approvalId } = validation.data;
+    const correlationId = validation.data.correlationId || `bazaar_${Math.random().toString(36).substring(2, 10)}`;
 
-    // 1. Fetch PurchaseApproval
     const approval = await db.purchaseApproval.findUnique({
       where: { id: approvalId },
+      include: { items: true }
     });
 
     if (!approval) {
       return NextResponse.json(
-        { error: "APPROVAL_NOT_FOUND", message: "The specified purchase approval was not found." },
+        { error: "APPROVAL_NOT_FOUND", message: "The specified purchase approval could not be found." },
         { status: 404 }
       );
     }
 
-    // Resolve correlationId from previous AuditTrail log
-    let correlationId = `bazaar_${Math.random().toString(36).substring(2, 10)}`;
-    const originalLog = await db.auditTrail.findFirst({
-      where: {
-        metadata: {
-          contains: approval.id,
-        },
-      },
-    });
-    if (originalLog) {
-      correlationId = originalLog.sessionId;
-    }
-
-    // Write checkout started event
-    await recordAuditEvent({
-      correlationId,
-      eventType: "RAZORPAY_CHECKOUT_STARTED",
-      outcome: "SUCCESS",
-      approvalId: approval.id,
+    await recordCommerceEvent({
+      eventType: "CHECKOUT_STARTED",
+      sessionId: correlationId,
       productId: approval.productId,
       merchantId: approval.merchantId,
       amount: approval.approvedAmountPaise,
-      currency: approval.currency,
+      source: approval.items.length > 0 ? approval.items[0].source : undefined,
     });
 
-    // 2. Confirm status is APPROVED
-    if (approval.status !== "APPROVED") {
-      await recordAuditEvent({
-        correlationId,
-        eventType: "RAZORPAY_CHECKOUT_BLOCKED",
-        outcome: "BLOCKED",
-        approvalId: approval.id,
-        productId: approval.productId,
-        merchantId: approval.merchantId,
-        amount: approval.approvedAmountPaise,
-        currency: approval.currency,
-        metadata: {
-          reason: "Approval is not in APPROVED state.",
-          currentStatus: approval.status,
-        },
-      });
-
-      return NextResponse.json(
-        {
-          allowed: false,
-          reason: "Purchase approval must be in APPROVED state to proceed.",
-        },
-        { status: 400 }
-      );
-    }
-
-    // 3. Confirm not expired
     const now = new Date();
-    if (now > new Date(approval.expiresAt)) {
+    if (approval.expiresAt < now) {
       await db.purchaseApproval.update({
         where: { id: approval.id },
         data: { status: "EXPIRED" },
       });
+      return NextResponse.json(
+        { error: "APPROVAL_EXPIRED", message: "The purchase approval window has expired." },
+        { status: 403 }
+      );
+    }
 
-      await recordAuditEvent({
-        correlationId,
-        eventType: "RAZORPAY_CHECKOUT_BLOCKED",
-        outcome: "BLOCKED",
-        approvalId: approval.id,
-        productId: approval.productId,
-        merchantId: approval.merchantId,
-        amount: approval.approvedAmountPaise,
-        currency: approval.currency,
-        metadata: {
-          reason: "Approval has expired before checkout.",
-        },
+    if (approval.status !== "PENDING" && approval.status !== "APPROVED") {
+      return NextResponse.json(
+        { error: "INVALID_STATUS", message: `Cannot checkout because approval status is ${approval.status}.` },
+        { status: 403 }
+      );
+    }
+
+    let dbItems = approval.items.length > 0 ? approval.items : [
+      { offerId: approval.sessionId, quantity: approval.quantity }
+    ];
+
+    let currentTotalPaise = 0;
+    let maxDeliveryDays = 0;
+    
+    for (const item of dbItems) {
+      const offer = await db.productOffer.findUnique({
+        where: { id: item.offerId },
       });
 
-      return NextResponse.json(
-        {
-          allowed: false,
-          reason: "Purchase approval has expired.",
-        },
-        { status: 400 }
-      );
+      if (!offer) {
+        return NextResponse.json(
+          { error: "OFFER_NOT_FOUND", message: "One of the original product offers is no longer available." },
+          { status: 404 }
+        );
+      }
+      
+      const parseDeliveryDays = (est: string): number => {
+        const cleaned = est.toLowerCase();
+        if (cleaned.includes("same day") || cleaned.includes("0 day")) return 0;
+        const match = cleaned.match(/(\d+)\s*day/);
+        return match ? parseInt(match[1]) : 7;
+      };
+      
+      const dDays = parseDeliveryDays(offer.deliveryEstimate);
+      if (dDays > maxDeliveryDays) maxDeliveryDays = dDays;
+
+      currentTotalPaise += offer.pricePaise * item.quantity + offer.shippingCostPaise;
     }
 
-    // 4. Retrieve bound offer
-    const offerId = approval.sessionId;
-
-    // 5. Fetch CURRENT offer from database
-    const offer = await db.productOffer.findUnique({
-      where: { id: offerId },
-    });
-
-    if (!offer) {
-      return NextResponse.json(
-        { error: "OFFER_NOT_FOUND", message: "The original product offer is no longer available." },
-        { status: 404 }
-      );
-    }
-
-    // 6. Recalculate total cost
-    const currentTotalPaise = offer.pricePaise * approval.quantity + offer.shippingCostPaise;
-
-    // 7. Verify price safety (spike protection check)
     if (currentTotalPaise > approval.approvedAmountPaise) {
       await db.purchaseApproval.update({
         where: { id: approval.id },
@@ -165,34 +127,15 @@ export async function POST(req: Request) {
         eventType: "RAZORPAY_CHECKOUT_BLOCKED",
         outcome: "BLOCKED",
         approvalId: approval.id,
-        productId: offer.productId,
-        offerId: offer.id,
-        merchantId: offer.merchantId,
+        productId: approval.productId,
+        merchantId: approval.merchantId,
         amount: currentTotalPaise,
-        currency: offer.currency,
+        currency: approval.currency,
         metadata: {
           approvedAmountPaise: approval.approvedAmountPaise,
           currentAmountPaise: currentTotalPaise,
           differencePaise,
           reason: "Price spike detected.",
-        },
-      });
-
-      // Also record PURCHASE_INVALIDATED event
-      await recordAuditEvent({
-        correlationId,
-        eventType: "PURCHASE_INVALIDATED",
-        outcome: "FAILURE",
-        approvalId: approval.id,
-        productId: offer.productId,
-        offerId: offer.id,
-        merchantId: offer.merchantId,
-        amount: currentTotalPaise,
-        currency: offer.currency,
-        metadata: {
-          approvedAmountPaise: approval.approvedAmountPaise,
-          currentAmountPaise: currentTotalPaise,
-          differencePaise,
         },
       });
 
@@ -203,20 +146,10 @@ export async function POST(req: Request) {
       });
     }
 
-    // 8. Re-evaluate policy against current DB settings
     const policy = await db.purchasePolicy.findFirst({
-      where: { currency: offer.currency },
+      where: { currency: approval.currency },
     });
 
-    const parseDeliveryDays = (est: string): number => {
-      const cleaned = est.toLowerCase();
-      if (cleaned.includes("same day") || cleaned.includes("0 day")) return 0;
-      const match = cleaned.match(/(\d+)\s*day/);
-      return match ? parseInt(match[1]) : 7;
-    };
-    const deliveryDays = parseDeliveryDays(offer.deliveryEstimate);
-
-    // Fetch the AI intent parsed event to get the user-requested budget limit securely
     let userRequestedBudget: number | null = null;
     if (correlationId) {
       const aiIntentEvent = await db.auditTrail.findFirst({
@@ -246,14 +179,14 @@ export async function POST(req: Request) {
       : accountPolicyMaximum;
 
     const evaluation = evaluatePurchasePolicy({
-      productId: offer.productId,
-      offerId: offer.id,
-      merchantId: offer.merchantId,
-      quantity: approval.quantity,
-      productPricePaise: offer.pricePaise,
-      shippingPaise: offer.shippingCostPaise,
+      productId: approval.productId,
+      offerId: approval.sessionId, 
+      merchantId: approval.merchantId,
+      quantity: dbItems.reduce((acc, it) => acc + it.quantity, 0),
+      productPricePaise: 0,
+      shippingPaise: 0,
       totalPaise: currentTotalPaise,
-      currency: offer.currency,
+      currency: approval.currency,
       policy: policy
         ? {
             id: policy.id,
@@ -270,17 +203,12 @@ export async function POST(req: Request) {
             name: "RazorBuy Hackathon Policy",
             maxAmountPaise: effectiveLimit,
             currency: "INR",
-            allowedMerchants: JSON.stringify([
-              "merchant-bazaar-depot",
-              "merchant-sports-games",
-              "merchant-fastkart",
-              "merchant-premium-boutique",
-            ]),
-            blockedCategories: JSON.stringify(["restricted"]),
-            maxQuantity: 1,
+            allowedMerchants: JSON.stringify([]),
+            blockedCategories: JSON.stringify([]),
+            maxQuantity: 10,
             expiresAt: null,
           },
-      deliveryEstimateDays: deliveryDays,
+      deliveryEstimateDays: maxDeliveryDays,
     });
 
     if (!evaluation.allowed) {
@@ -293,16 +221,28 @@ export async function POST(req: Request) {
         },
       });
 
+      await recordCommerceEvent({
+        eventType: "POLICY_BLOCKED",
+        sessionId: correlationId,
+        productId: approval.productId,
+        merchantId: approval.merchantId,
+        amount: currentTotalPaise,
+        source: approval.items.length > 0 ? approval.items[0].source : undefined,
+        metadata: {
+          reasons: evaluation.reasons,
+          checks: evaluation.checks.map(c => ({ name: c.name, passed: c.passed, limit: c.limit }))
+        }
+      });
+
       await recordAuditEvent({
         correlationId,
         eventType: "RAZORPAY_CHECKOUT_BLOCKED",
         outcome: "BLOCKED",
         approvalId: approval.id,
-        productId: offer.productId,
-        offerId: offer.id,
-        merchantId: offer.merchantId,
+        productId: approval.productId,
+        merchantId: approval.merchantId,
         amount: currentTotalPaise,
-        currency: offer.currency,
+        currency: approval.currency,
         metadata: {
           reason: "Policy check failed during checkout.",
           reasons: evaluation.reasons,
@@ -318,44 +258,53 @@ export async function POST(req: Request) {
       });
     }
 
-    // 9. Create Razorpay order
     const orderReceipt = `receipt_app_${approval.id.slice(0, 10)}_${Date.now().toString().slice(-6)}`;
     const razorpayOrder = await createRazorpayOrderServer({
       amount: currentTotalPaise,
-      currency: offer.currency,
+      currency: approval.currency,
       receipt: orderReceipt,
       notes: {
         approvalId: approval.id,
-        productId: offer.productId,
-        offerId: offer.id,
-        merchantId: offer.merchantId,
+        productId: approval.productId,
+        merchantId: approval.merchantId,
+        basketCount: dbItems.length.toString()
       },
     });
 
-    // 10. Store order in Transaction table
     const transaction = await db.transaction.create({
       data: {
         purchaseApprovalId: approval.id,
         razorpayOrderId: razorpayOrder.id,
         approvedAmountPaise: approval.approvedAmountPaise,
         finalAmountPaise: currentTotalPaise,
-        currency: offer.currency,
+        currency: approval.currency,
         status: "INITIATED",
       },
     });
 
-    // 11. Write AuditTrail record
+    await recordCommerceEvent({
+      eventType: "RAZORPAY_ORDER_CREATED",
+      sessionId: correlationId,
+      productId: approval.productId,
+      merchantId: approval.merchantId,
+      amount: currentTotalPaise,
+      source: approval.items.length > 0 ? approval.items[0].source : undefined,
+      metadata: {
+        orderId: razorpayOrder.id,
+        transactionId: transaction.id
+      }
+    });
+
     await recordAuditEvent({
       correlationId,
       eventType: "RAZORPAY_ORDER_CREATED",
       outcome: "SUCCESS",
       approvalId: approval.id,
       transactionId: transaction.id,
-      productId: offer.productId,
-      offerId: offer.id,
-      merchantId: offer.merchantId,
+      productId: approval.productId,
+      merchantId: approval.merchantId,
       amount: currentTotalPaise,
-      currency: offer.currency,
+      currency: approval.currency,
       metadata: {
         orderId: razorpayOrder.id,
       },

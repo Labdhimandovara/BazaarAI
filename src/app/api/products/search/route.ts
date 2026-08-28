@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { commerceService } from "@/services/commerce";
+import { recordCommerceEvent } from "@/services/events";
 
 const searchSchema = z.object({
   query: z.string().optional(),
@@ -49,7 +50,29 @@ export async function GET(request: Request) {
       );
     }
 
+    await recordCommerceEvent({
+      eventType: "SEARCH_PERFORMED",
+      source: validationResult.data.source,
+      metadata: {
+        query: validationResult.data.query,
+        category: validationResult.data.category,
+        maxPricePaise: validationResult.data.maxPricePaise,
+        maxDeliveryDays: validationResult.data.maxDeliveryDays,
+      },
+    });
+
     const offers = await commerceService.searchProducts(validationResult.data);
+
+    await recordCommerceEvent({
+      eventType: "PRODUCTS_FOUND",
+      source: validationResult.data.source,
+      metadata: {
+        query: validationResult.data.query,
+        category: validationResult.data.category,
+        resultCount: offers.length,
+      },
+    });
+
     return NextResponse.json({ success: true, count: offers.length, offers });
   } catch (error) {
     console.error("Search API Error:", error);
@@ -90,7 +113,29 @@ export async function POST(request: Request) {
       );
     }
 
+    await recordCommerceEvent({
+      eventType: "SEARCH_PERFORMED",
+      source: validationResult.data.source,
+      metadata: {
+        query: validationResult.data.query,
+        category: validationResult.data.category,
+        maxPricePaise: validationResult.data.maxPricePaise,
+        maxDeliveryDays: validationResult.data.maxDeliveryDays,
+      },
+    });
+
     const offers = await commerceService.searchProducts(validationResult.data);
+
+    await recordCommerceEvent({
+      eventType: "PRODUCTS_FOUND",
+      source: validationResult.data.source,
+      metadata: {
+        query: validationResult.data.query,
+        category: validationResult.data.category,
+        resultCount: offers.length,
+      },
+    });
+
     return NextResponse.json({ success: true, count: offers.length, offers });
   } catch (error) {
     console.error("Search API Error:", error);

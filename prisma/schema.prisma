@@ -17,6 +17,8 @@ model Merchant {
   isRazorpayEnabled  Boolean        @default(true)
   checkoutType       String         @default("direct") // direct | redirect
   catalogStatus      String         @default("AI_READY") // AI_READY | MANUAL
+  bundleEnabled      Boolean        @default(false)
+  discountEnabled    Boolean        @default(false)
   createdAt          DateTime       @default(now())
   updatedAt          DateTime       @updatedAt
   offers             ProductOffer[]
@@ -108,6 +110,7 @@ model PurchaseApproval {
   invalidatedAt       DateTime?
   invalidationReason  String?
   transactions        Transaction[]
+  items               PurchaseApprovalItem[]
 }
 
 // 7. Transaction Table
@@ -135,3 +138,31 @@ model AuditTrail {
   outcome   String   // SUCCESS | FAILURE | BLOCKED etc.
   createdAt DateTime @default(now())
 }
+
+model PurchaseApprovalItem {
+  id                  String           @id @default(uuid())
+  purchaseApprovalId  String
+  purchaseApproval    PurchaseApproval @relation(fields: [purchaseApprovalId], references: [id], onDelete: Cascade)
+  offerId             String
+  productId           String
+  merchantId          String
+  source              String
+  quantity            Int              @default(1)
+  unitPricePaise      Int
+  shippingCostPaise   Int              @default(0)
+  totalPaise          Int
+}
+
+model CommerceEvent {
+  id          String   @id @default(uuid())
+  eventType   String   // e.g. "SEARCH_PERFORMED" | "PRODUCTS_FOUND"
+  timestamp   DateTime @default(now())
+  sessionId   String?
+  source      String?
+  offerId     String?
+  productId   String?
+  merchantId  String?
+  amount      Int?
+  metadata    String?  // JSON string
+}
+

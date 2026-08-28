@@ -23,11 +23,16 @@ export function AppShell({ children }: AppShellProps) {
           <span>Purchase Policy Active</span>
         </div>
 
-        {/* User Account Mock Button */}
-        <button onClick={() => setAccountOpen(true)} className="flex items-center gap-2 p-1.5 px-3 rounded-xl border border-[#E6E0D6] bg-[#FFFFFF] hover:bg-[#F7F4EE] text-[#172033] transition-all shadow-sm">
-          <User className="w-4 h-4 text-[#667085]" />
-          <span className="text-xs font-semibold hidden sm:inline-block">Account</span>
-        </button>
+        {/* Merchant Console & User Account */}
+        <div className="flex items-center gap-2">
+          <a href="/merchant" className="flex items-center gap-2 p-1.5 px-3 rounded-xl border border-[#E6E0D6] bg-[#FFFFFF] hover:bg-[#F7F4EE] text-[#172033] transition-all shadow-sm">
+            <span className="text-xs font-semibold hidden sm:inline-block">Merchant Console</span>
+          </a>
+          <button onClick={() => setAccountOpen(true)} className="flex items-center gap-2 p-1.5 px-3 rounded-xl border border-[#E6E0D6] bg-[#FFFFFF] hover:bg-[#F7F4EE] text-[#172033] transition-all shadow-sm">
+            <User className="w-4 h-4 text-[#667085]" />
+            <span className="text-xs font-semibold hidden sm:inline-block">Account</span>
+          </button>
+        </div>
       </header>
 
       {/* Main Core Layout */}

@@ -1,10 +1,12 @@
 import { NextResponse } from "next/server";
+import { generateCrossSells } from "@/services/growth";
 import { z } from "zod";
 import { parseIntentFromConversation, ChatMessage } from "@/services/intent";
 import { commerceService, SearchParams } from "@/services/commerce";
 import { rankProducts } from "@/services/scoring";
 import { recordAuditEvent } from "@/services/audit";
 import { filterEligibleProducts } from "@/services/eligibility";
+import { recordCommerceEvent } from "@/services/events";
 
 const chatRequestSchema = z.object({
   message: z.string().min(1, "Message cannot be empty"),
@@ -102,7 +104,30 @@ export async function POST(req: Request) {
     };
 
     // 4. Query Commerce Service
+    await recordCommerceEvent({
+      eventType: "SEARCH_PERFORMED",
+      sessionId: correlationId,
+      source: searchParams.source,
+      metadata: {
+        query: searchParams.query,
+        category: searchParams.category,
+        maxPricePaise: searchParams.maxPricePaise,
+        maxDeliveryDays: searchParams.maxDeliveryDays,
+      },
+    });
+
     const offers = await commerceService.searchProducts(searchParams);
+
+    await recordCommerceEvent({
+      eventType: "PRODUCTS_FOUND",
+      sessionId: correlationId,
+      source: searchParams.source,
+      metadata: {
+        query: searchParams.query,
+        category: searchParams.category,
+        resultCount: offers.length,
+      },
+    });
 
     // Audit search execution
     await recordAuditEvent({
@@ -127,9 +152,26 @@ export async function POST(req: Request) {
     const eligibleOffers = filterEligibleProducts(offers, intent);
     const rankedOffers = rankProducts(eligibleOffers, scoringIntent, intent.objective);
 
-    // Audit product recommendations
+    let crossSells: any[] = [];
     if (rankedOffers.length > 0) {
       const winner = rankedOffers[0];
+      crossSells = await generateCrossSells(winner.offer, intent.maxBudgetPaise || null, eligibleOffers);
+      
+      await recordCommerceEvent({
+        eventType: "PRODUCT_RECOMMENDED",
+        sessionId: correlationId,
+        source: winner.offer.source,
+        offerId: winner.offer.offerId,
+        productId: winner.offer.canonicalProductId,
+        merchantId: winner.offer.merchantId,
+        amount: winner.offer.pricePaise + winner.offer.shippingCostPaise,
+        metadata: {
+          score: winner.scoreBreakdown.overallScore,
+          objective: intent.objective,
+        },
+      });
+
+      // Audit product recommendations
       await recordAuditEvent({
         correlationId,
         eventType: "PRODUCT_RECOMMENDED",
@@ -142,8 +184,35 @@ export async function POST(req: Request) {
           score: winner.scoreBreakdown.overallScore,
           objective: intent.objective,
           reason: winner.scoreBreakdown.reasons[0],
+          crossSellOffered: crossSells.length > 0,
         },
       });
+      
+      if (crossSells.length > 0) {
+        await recordCommerceEvent({
+          eventType: "CROSS_SELL_SHOWN",
+          sessionId: correlationId,
+          source: crossSells[0].offer.source,
+          offerId: crossSells[0].offer.offerId,
+          productId: crossSells[0].offer.canonicalProductId,
+          merchantId: crossSells[0].offer.merchantId,
+          amount: crossSells[0].offer.pricePaise + crossSells[0].offer.shippingCostPaise,
+          metadata: {
+            reasons: crossSells[0].reasons,
+          },
+        });
+
+        await recordAuditEvent({
+          correlationId,
+          eventType: "GROWTH_CROSS_SELL_GENERATED",
+          outcome: "SUCCESS",
+          productId: crossSells[0].offer.canonicalProductId,
+          offerId: crossSells[0].offer.offerId,
+          merchantId: crossSells[0].offer.merchantId,
+          amount: crossSells[0].offer.pricePaise + crossSells[0].offer.shippingCostPaise,
+          metadata: { reasons: crossSells[0].reasons }
+        });
+      }
     }
 
     // 6. Return Structured Recommendations
@@ -152,6 +221,7 @@ export async function POST(req: Request) {
       intent,
       correlationId,
       providerStatuses,
+      crossSells,
       recommendations: rankedOffers.map(ro => ({
         offerId: ro.offer.offerId,
         productName: ro.offer.productName,
