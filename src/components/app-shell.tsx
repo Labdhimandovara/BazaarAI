@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { BrandLogo } from "./brand-logo";
 import { ShieldCheck, User, X } from "lucide-react";
+import { DevLogConsole } from "./dev-log-console";
 
 interface AppShellProps {
   children: React.ReactNode;
@@ -39,6 +40,9 @@ export function AppShell({ children }: AppShellProps) {
       <main className="flex-1 max-w-4xl w-full mx-auto px-4 sm:px-8 py-8 flex flex-col justify-start">
         {children}
       </main>
+
+      {/* Dev Diagnostic Log Console */}
+      <DevLogConsole />
 
       {/* Bottom Footer */}
       <footer className="w-full border-t border-[#E6E0D6] py-6 px-4 text-center bg-[#F7F4EE]">
